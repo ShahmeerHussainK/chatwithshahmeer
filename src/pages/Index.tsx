@@ -10,6 +10,8 @@ interface Message {
   isUser: boolean;
 }
 
+const OPENAI_API_KEY = "your-api-key-here"; // Replace with your actual OpenAI API key
+
 const Index = () => {
   const [messages, setMessages] = useState<Message[]>([
     {
@@ -31,16 +33,29 @@ const Index = () => {
     setIsLoading(true);
 
     try {
-      const response = await fetch("https://chatwithshahmeer.vercel.app/api/chat-with-shahmeer", {
+      const response = await fetch("https://api.openai.com/v1/chat/completions", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: userMessage }),
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${OPENAI_API_KEY}`
+        },
+        body: JSON.stringify({
+          model: "gpt-3.5-turbo",
+          messages: [
+            {
+              role: "system",
+              content: "You are Shahmeer Hussain, a skilled software engineer. You have expertise in web development, system design, and software architecture. You are professional yet friendly, and you enjoy helping others learn about technology. Keep your responses concise, technical when appropriate, but always accessible. Sign off each message with '- Shahmeer'"
+            },
+            { role: "user", content: userMessage }
+          ],
+        }),
       });
 
       if (!response.ok) throw new Error("Failed to send message");
 
       const data = await response.json();
-      setMessages((prev) => [...prev, { content: data.reply, isUser: false }]);
+      const aiResponse = data.choices[0].message.content;
+      setMessages((prev) => [...prev, { content: aiResponse, isUser: false }]);
     } catch (error) {
       toast({
         title: "Error",
