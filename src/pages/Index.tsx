@@ -31,7 +31,7 @@ const Index = () => {
     setIsLoading(true);
 
     try {
-      const response = await fetch("/api/chat-with-shahmeer", {
+      const response = await fetch("https://chatwithshahmeer.vercel.app/api/chat-with-shahmeer", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message: userMessage }),
@@ -47,6 +47,7 @@ const Index = () => {
         description: "Failed to send message. Please try again.",
         variant: "destructive",
       });
+      console.error("Chat error:", error);
     } finally {
       setIsLoading(false);
     }
