@@ -10,6 +10,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { toast } from '@/hooks/use-toast';
 
 interface Auction {
   id: string;
@@ -20,6 +21,7 @@ interface Auction {
   max_spots: number;
   filled_spots: number;
   ends_at: string;
+  winners_processed: boolean;
 }
 
 export default function Index() {
@@ -29,6 +31,53 @@ export default function Index() {
 
   useEffect(() => {
     const fetchAuctions = async () => {
+      // First, check for auctions that have ended but haven't been processed
+      const currentTime = new Date().toISOString();
+      const { data: endedAuctions, error: endedError } = await supabase
+        .from('auctions')
+        .select('id')
+        .lt('ends_at', currentTime)
+        .eq('winners_processed', false);
+      
+      if (endedError) {
+        console.error('Error checking ended auctions:', endedError);
+      } else if (endedAuctions && endedAuctions.length > 0) {
+        console.log(`Found ${endedAuctions.length} ended auctions that need processing`);
+        
+        // Update these auctions to trigger the database function
+        for (const auction of endedAuctions) {
+          const { error: updateError } = await supabase
+            .from('auctions')
+            .update({ winners_processed: true })
+            .eq('id', auction.id);
+          
+          if (updateError) {
+            console.error(`Error updating auction ${auction.id}:`, updateError);
+          } else {
+            console.log(`Marked auction ${auction.id} as processed`);
+            // Call the process-auction-winners function directly
+            try {
+              const { data, error } = await supabase.functions.invoke('process-auction-winners', {
+                body: {}
+              });
+              
+              if (error) {
+                console.error('Error invoking process-auction-winners:', error);
+              } else {
+                console.log('Successfully processed auction winners:', data);
+                toast({
+                  title: "Auction ended",
+                  description: "Winner notifications have been sent",
+                });
+              }
+            } catch (invokeError) {
+              console.error('Error invoking function:', invokeError);
+            }
+          }
+        }
+      }
+
+      // Now fetch active auctions for display
       const { data, error } = await supabase
         .from('auctions')
         .select('*')
