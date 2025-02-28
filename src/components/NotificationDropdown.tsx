@@ -17,7 +17,7 @@ interface Notification {
   user_id: string;
   message: string;
   type: string;
-  is_read: boolean;
+  read: boolean;  // Changed from is_read to read to match the database schema
   created_at: string;
 }
 
@@ -41,7 +41,7 @@ export function NotificationDropdown() {
       if (error) throw error;
       
       setNotifications(data || []);
-      setUnreadCount(data?.filter(n => !n.is_read).length || 0);
+      setUnreadCount(data?.filter(n => !n.read).length || 0);
     } catch (error) {
       console.error('Error fetching notifications:', error);
       toast({
@@ -82,7 +82,7 @@ export function NotificationDropdown() {
     try {
       const { error } = await supabase
         .from('notifications')
-        .update({ is_read: true })
+        .update({ read: true })
         .eq('id', id);
       
       if (error) throw error;
@@ -90,7 +90,7 @@ export function NotificationDropdown() {
       // Update local state to reflect the change
       setNotifications(prev => 
         prev.map(notif => 
-          notif.id === id ? { ...notif, is_read: true } : notif
+          notif.id === id ? { ...notif, read: true } : notif
         )
       );
       setUnreadCount(prev => Math.max(0, prev - 1));
@@ -105,15 +105,15 @@ export function NotificationDropdown() {
     try {
       const { error } = await supabase
         .from('notifications')
-        .update({ is_read: true })
+        .update({ read: true })
         .eq('user_id', user?.id)
-        .eq('is_read', false);
+        .eq('read', false);
       
       if (error) throw error;
       
       // Update local state
       setNotifications(prev => 
-        prev.map(notif => ({ ...notif, is_read: true }))
+        prev.map(notif => ({ ...notif, read: true }))
       );
       setUnreadCount(0);
     } catch (error) {
@@ -171,13 +171,13 @@ export function NotificationDropdown() {
             notifications.map((notification) => (
               <div 
                 key={notification.id}
-                className={`p-3 border-b transition-colors ${notification.is_read ? 'bg-background' : 'bg-muted'}`}
-                onClick={() => !notification.is_read && markAsRead(notification.id)}
+                className={`p-3 border-b transition-colors ${notification.read ? 'bg-background' : 'bg-muted'}`}
+                onClick={() => !notification.read && markAsRead(notification.id)}
               >
                 <div className="flex gap-2">
                   <div className="text-xl">{getNotificationIcon(notification.type)}</div>
                   <div className="flex-1">
-                    <p className={`text-sm ${notification.is_read ? 'text-foreground' : 'font-medium'}`}>
+                    <p className={`text-sm ${notification.read ? 'text-foreground' : 'font-medium'}`}>
                       {notification.message}
                     </p>
                     <p className="text-xs text-muted-foreground mt-1">
