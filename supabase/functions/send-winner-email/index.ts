@@ -16,17 +16,24 @@ serve(async (req) => {
   }
 
   try {
+    console.log("Starting send-winner-email function");
+    
     const supabaseClient = createClient(
       Deno.env.get("SUPABASE_URL") ?? "",
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? ""
     );
 
     // Get request body
-    const { winnerId } = await req.json();
+    const requestBody = await req.json();
+    console.log("Request body:", JSON.stringify(requestBody));
+    
+    const { winnerId } = requestBody;
     
     if (!winnerId) {
       throw new Error("Winner ID is required");
     }
+
+    console.log(`Processing winner ID: ${winnerId}`);
 
     // Get the winner details with related information
     const { data: winner, error: winnerError } = await supabaseClient
@@ -52,10 +59,18 @@ serve(async (req) => {
       .single();
 
     if (winnerError || !winner) {
+      console.error("Winner fetch error:", winnerError);
       throw new Error(`Winner not found: ${winnerError?.message || "No data returned"}`);
     }
 
-    // Configure email client
+    console.log(`Found winner: ${JSON.stringify(winner)}`);
+    
+    if (!winner.profiles?.email) {
+      throw new Error("Winner has no email address");
+    }
+
+    // Configure email client with your Google credentials
+    console.log("Setting up SMTP client");
     const client = new SMTPClient({
       connection: {
         hostname: "smtp.gmail.com",
@@ -69,22 +84,29 @@ serve(async (req) => {
     });
 
     // Create payment link for the winner
+    console.log("Creating checkout session");
     const { data: sessionData, error: sessionError } = await supabaseClient.functions.invoke(
       "create-checkout-session",
       {
         body: {
-          bid_id: winner.winning_bid_id,
-          user_id: winner.user_id,
-          amount: winner.bids.amount
+          bidId: winner.winning_bid_id,
         },
       }
     );
 
-    if (sessionError || !sessionData?.url) {
-      throw new Error(`Failed to create payment session: ${sessionError?.message || "No payment URL returned"}`);
+    if (sessionError) {
+      console.error("Checkout session error:", sessionError);
+      throw new Error(`Failed to create payment session: ${sessionError.message}`);
     }
 
-    const paymentUrl = sessionData.url;
+    if (!sessionData?.sessionUrl) {
+      console.error("No session URL returned:", sessionData);
+      throw new Error("No payment URL returned from checkout session");
+    }
+
+    const paymentUrl = sessionData.sessionUrl;
+    console.log(`Created payment URL: ${paymentUrl}`);
+    
     const deadlineDate = new Date(winner.payment_deadline);
     const formattedDeadline = deadlineDate.toLocaleString(undefined, {
       weekday: 'long',
@@ -96,6 +118,7 @@ serve(async (req) => {
     });
 
     // Creating email content
+    console.log("Creating email content");
     const emailContent = `
       <html>
         <head>
@@ -131,22 +154,31 @@ serve(async (req) => {
     `;
 
     // Send the email
-    await client.send({
-      from: "Backlink Bidder Hub <shahmeerhussainkhadmi@gmail.com>",
-      to: winner.profiles.email,
-      subject: `Action Required: Complete Your Payment for ${winner.auctions.title}`,
-      content: emailContent,
-      html: emailContent,
-    });
+    console.log(`Attempting to send email to: ${winner.profiles.email}`);
+    
+    try {
+      await client.send({
+        from: "Backlink Bidder Hub <shahmeerhussainkhadmi@gmail.com>",
+        to: winner.profiles.email,
+        subject: `Action Required: Complete Your Payment for ${winner.auctions.title}`,
+        content: emailContent,
+        html: emailContent,
+      });
+      console.log("Email sent successfully");
+    } catch (emailError) {
+      console.error("SMTP error details:", emailError);
+      throw new Error(`Failed to send email: ${emailError.message}`);
+    }
 
     // Create a notification in the database
+    console.log("Creating notification in database");
     await supabaseClient.rpc("create_notification", {
       p_user_id: winner.user_id,
       p_type: "auction_win",
       p_message: `You've won a spot in the auction: ${winner.auctions.title}. Please complete your payment by ${formattedDeadline}.`
     });
 
-    console.log(`Email sent successfully to: ${winner.profiles.email}`);
+    console.log(`Process completed successfully for winner: ${winner.profiles.email}`);
 
     return new Response(
       JSON.stringify({ 
