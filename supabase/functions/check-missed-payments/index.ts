@@ -15,25 +15,39 @@ serve(async (req) => {
   }
 
   try {
+    console.log("Starting check-missed-payments function");
+    
     const supabaseClient = createClient(
       Deno.env.get("SUPABASE_URL") ?? "",
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? ""
     );
 
-    // Find winners who missed their payment deadline
-    const { data: missedPayments, error: missedError } = await supabaseClient
+    // Get winners who have missed their payment deadlines
+    const { data: missedPayments, error: missedPaymentsError } = await supabaseClient
       .from("auction_winners")
-      .select("id, auction_id, user_id")
+      .select(`
+        id,
+        user_id,
+        auction_id,
+        payment_deadline,
+        auctions:auction_id (title)
+      `)
       .eq("status", "pending_payment")
       .lt("payment_deadline", new Date().toISOString());
 
-    if (missedError) {
-      throw new Error(`Error fetching missed payments: ${missedError.message}`);
+    if (missedPaymentsError) {
+      console.error("Error fetching missed payments:", missedPaymentsError);
+      throw new Error(`Failed to fetch missed payments: ${missedPaymentsError.message}`);
     }
+
+    console.log(`Found ${missedPayments?.length || 0} missed payments to process`);
 
     if (!missedPayments || missedPayments.length === 0) {
       return new Response(
-        JSON.stringify({ message: "No missed payments to process" }),
+        JSON.stringify({ 
+          success: true, 
+          message: "No missed payments to process" 
+        }),
         {
           headers: { ...corsHeaders, "Content-Type": "application/json" },
           status: 200,
@@ -41,93 +55,43 @@ serve(async (req) => {
       );
     }
 
-    console.log(`Processing ${missedPayments.length} missed payments`);
-
     // Process each missed payment
-    const results = await Promise.all(
-      missedPayments.map(async (missed) => {
-        // Mark the winner as missed payment
-        await supabaseClient
-          .from("auction_winners")
-          .update({ status: "payment_missed" })
-          .eq("id", missed.id);
+    for (const winner of missedPayments) {
+      console.log(`Processing missed payment for winner ${winner.id} (auction: ${winner.auction_id})`);
+      
+      // Update winner status to payment_missed
+      const { error: updateError } = await supabaseClient
+        .from("auction_winners")
+        .update({ status: "payment_missed" })
+        .eq("id", winner.id);
 
-        // Get current winners for this auction
-        const { data: currentWinners } = await supabaseClient
-          .from("auction_winners")
-          .select("user_id")
-          .eq("auction_id", missed.auction_id);
+      if (updateError) {
+        console.error(`Error updating winner ${winner.id}:`, updateError);
+        continue;
+      }
 
-        const currentWinnerIds = currentWinners?.map(w => w.user_id) || [];
+      // Create notification for the user
+      const { error: notificationError } = await supabaseClient.rpc("create_notification", {
+        p_user_id: winner.user_id,
+        p_type: "payment_missed",
+        p_message: `You've missed the payment deadline for auction: ${winner.auctions.title}. Your spot has been released.`
+      });
 
-        // Find next highest bidder who isn't already a winner
-        const { data: nextBidder, error: nextError } = await supabaseClient
-          .from("bids")
-          .select("id, user_id, amount")
-          .eq("auction_id", missed.auction_id)
-          .eq("status", "active")
-          .not("user_id", "in", `(${currentWinnerIds.join(',')})`)
-          .order("amount", { ascending: false })
-          .limit(1)
-          .single();
+      if (notificationError) {
+        console.error(`Error creating notification for user ${winner.user_id}:`, notificationError);
+      }
 
-        if (nextError || !nextBidder) {
-          // No more eligible bidders
-          return {
-            auction_id: missed.auction_id,
-            missed_winner_id: missed.user_id,
-            message: "No more eligible bidders available"
-          };
-        }
+      // Find the next highest bidder (if any)
+      await supabaseClient.rpc("process_missed_payments");
+    }
 
-        // Set 24 hour payment deadline for next bidder
-        const deadline = new Date();
-        deadline.setHours(deadline.getHours() + 24);
-
-        // Create new winner record for next bidder
-        const { data: newWinner, error: newWinnerError } = await supabaseClient
-          .from("auction_winners")
-          .insert({
-            auction_id: missed.auction_id,
-            user_id: nextBidder.user_id,
-            winning_bid_id: nextBidder.id,
-            payment_deadline: deadline.toISOString(),
-            status: "pending_payment"
-          })
-          .select()
-          .single();
-
-        if (newWinnerError) {
-          throw new Error(`Error creating new winner: ${newWinnerError.message}`);
-        }
-
-        // Send email notification to new winner
-        try {
-          await fetch(`${Deno.env.get("SUPABASE_URL")}/functions/v1/send-winner-email`, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "Authorization": `Bearer ${Deno.env.get("SUPABASE_ANON_KEY")}`
-            },
-            body: JSON.stringify({
-              winnerId: newWinner.id
-            })
-          });
-        } catch (emailError) {
-          console.error(`Error sending new winner email: ${emailError}`);
-        }
-
-        return {
-          auction_id: missed.auction_id,
-          missed_winner_id: missed.user_id,
-          new_winner_id: nextBidder.user_id,
-          new_winner_bid_amount: nextBidder.amount
-        };
-      })
-    );
+    console.log("Missed payments processing completed");
 
     return new Response(
-      JSON.stringify({ success: true, results }),
+      JSON.stringify({ 
+        success: true, 
+        processed: missedPayments.length 
+      }),
       {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
         status: 200,
