@@ -20,121 +20,94 @@ serve(async (req) => {
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? ""
     );
 
-    // Find auctions that have ended but haven't been processed
-    const { data: endedAuctions, error: auctionError } = await supabaseClient
+    // Find auctions that have ended but winners haven't been processed
+    const { data: endedAuctions, error: auctionsError } = await supabaseClient
       .from("auctions")
-      .select("id, title, max_spots")
-      .eq("status", "active")
-      .lt("ends_at", new Date().toISOString());
+      .select("id, title")
+      .lt("ends_at", new Date().toISOString())
+      .eq("status", "active");
 
-    if (auctionError) {
-      throw new Error(`Error fetching ended auctions: ${auctionError.message}`);
+    if (auctionsError) {
+      throw new Error(`Error fetching ended auctions: ${auctionsError.message}`);
     }
 
-    if (!endedAuctions || endedAuctions.length === 0) {
-      return new Response(
-        JSON.stringify({ message: "No ended auctions to process" }),
-        {
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-          status: 200,
-        }
-      );
-    }
+    console.log(`Found ${endedAuctions?.length || 0} ended auctions to process`);
 
-    console.log(`Processing ${endedAuctions.length} ended auctions`);
+    const results = [];
 
-    // Process each ended auction
-    const results = await Promise.all(
-      endedAuctions.map(async (auction) => {
-        // Mark auction as completed
-        await supabaseClient
-          .from("auctions")
-          .update({ status: "completed" })
-          .eq("id", auction.id);
+    for (const auction of endedAuctions || []) {
+      // Update auction status to "ended"
+      const { error: updateError } = await supabaseClient
+        .from("auctions")
+        .update({ status: "ended" })
+        .eq("id", auction.id);
 
-        // Find top bidders for this auction
-        const { data: topBids, error: bidError } = await supabaseClient
-          .from("bids")
-          .select("id, user_id, amount")
-          .eq("auction_id", auction.id)
-          .eq("status", "active")  // Only consider active bids
-          .order("amount", { ascending: false })
-          .limit(auction.max_spots || 3);
-
-        if (bidError) {
-          throw new Error(`Error fetching top bids: ${bidError.message}`);
-        }
-
-        if (!topBids || topBids.length === 0) {
-          return {
-            auction_id: auction.id,
-            message: "No qualifying bids found",
-            winners: []
-          };
-        }
-
-        // Create auction_winners entries
-        const winners = await Promise.all(
-          topBids.map(async (bid) => {
-            // Set 24 hour payment deadline
-            const deadline = new Date();
-            deadline.setHours(deadline.getHours() + 24);
-
-            // Insert winner record
-            const { data: winner, error: winnerError } = await supabaseClient
-              .from("auction_winners")
-              .insert({
-                auction_id: auction.id,
-                user_id: bid.user_id,
-                winning_bid_id: bid.id,
-                payment_deadline: deadline.toISOString(),
-                status: "pending_payment"
-              })
-              .select()
-              .single();
-
-            if (winnerError) {
-              console.error(`Error creating winner record: ${winnerError.message}`);
-              return null;
-            }
-
-            // Send email notification to winner
-            try {
-              await fetch(`${Deno.env.get("SUPABASE_URL")}/functions/v1/send-winner-email`, {
-                method: "POST",
-                headers: {
-                  "Content-Type": "application/json",
-                  "Authorization": `Bearer ${Deno.env.get("SUPABASE_ANON_KEY")}`
-                },
-                body: JSON.stringify({
-                  winnerId: winner.id
-                })
-              });
-            } catch (emailError) {
-              console.error(`Error sending winner email: ${emailError}`);
-            }
-
-            return winner;
-          })
-        );
-
-        return {
+      if (updateError) {
+        console.error(`Error updating auction ${auction.id} status: ${updateError.message}`);
+        results.push({
           auction_id: auction.id,
-          title: auction.title,
-          winners: winners.filter(Boolean)
-        };
-      })
-    );
+          success: false,
+          error: updateError.message
+        });
+        continue;
+      }
+
+      // Get the winners for this auction
+      const { data: winners, error: winnersError } = await supabaseClient
+        .from("auction_winners")
+        .select("id, user_id, winning_bid_id")
+        .eq("auction_id", auction.id)
+        .eq("status", "pending_payment");
+
+      if (winnersError) {
+        console.error(`Error fetching winners for auction ${auction.id}: ${winnersError.message}`);
+        results.push({
+          auction_id: auction.id,
+          success: false,
+          error: winnersError.message
+        });
+        continue;
+      }
+
+      console.log(`Found ${winners?.length || 0} winners for auction ${auction.id}`);
+
+      // Send emails to all winners
+      for (const winner of winners || []) {
+        try {
+          // Call the send-winner-email function
+          const { error: emailError } = await supabaseClient.functions.invoke(
+            "send-winner-email",
+            {
+              body: { winnerId: winner.id }
+            }
+          );
+
+          if (emailError) {
+            console.error(`Error sending email to winner ${winner.id}: ${emailError.message}`);
+          } else {
+            console.log(`Successfully sent email to winner ${winner.id}`);
+          }
+        } catch (emailErr) {
+          console.error(`Exception sending email to winner ${winner.id}: ${emailErr.message}`);
+        }
+      }
+
+      results.push({
+        auction_id: auction.id,
+        success: true,
+        winners_count: winners?.length || 0
+      });
+    }
 
     return new Response(
-      JSON.stringify({ success: true, results }),
+      JSON.stringify({ results }),
       {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
         status: 200,
       }
     );
   } catch (error) {
-    console.error("Error in process-auction-winners function:", error);
+    console.error("Error processing auction winners:", error);
     return new Response(
       JSON.stringify({ error: error.message }),
       {
